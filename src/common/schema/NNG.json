@@ -1,0 +1,6 @@
+{
+  "stage": "NNG",
+  "version": "0.1.2",
+  "benchmark": "omni-scrna/split-stages-plan",
+  "args": [{ "flag": "--embedding_tsv", "type": "path", "help": "Embedding TSV (cell_ids as rownames)" }]
+}

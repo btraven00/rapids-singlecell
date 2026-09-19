@@ -22,6 +22,9 @@ version = "0.1.0"
 [dependencies]
 python = ">=3.13,<3.14"
 pip = "*"
+# Same pin as the scanpy module: the TSV writers are the same code in both, so
+# they must be the same polars (see src/writers._write_tsv).
+polars = ">=1,<2"
 
 [pypi-dependencies]
 rapids-singlecell-cu13 = { version = "==0.16.1", extras = ["rapids"] }

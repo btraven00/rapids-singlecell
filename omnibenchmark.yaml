@@ -5,7 +5,21 @@ entrypoints:
   pca-prof: denet pca.py
   knn: knn.py
   knn-prof: denet knn.py
-  cluster_graph: cluster_graph.py
-  cluster_graph-prof: denet cluster_graph.py
-  cluster_embedding: cluster_embedding.py
+  cluster: cluster_graph.py # CLUST stage: graph clustering on neighbors_h5
+  cluster-prof: denet cluster_graph.py
+  cluster_embedding: cluster_embedding.py # rapids extra: clusters from embedding_tsv (no plan stage)
   cluster_embedding-prof: denet cluster_embedding.py
+
+# common code (cli engine + stage schemas) vendored into src/common/.
+# `pixi run -e dev sync` (from this module root) refreshes it.
+templates:
+  repo: https://github.com/omni-scrna/boilerplate
+  ref: main
+  lang: python
+
+# benchmark(s) this module works with
+benchmarks:
+  - name: split-stages
+    repo: https://github.com/omni-scrna/split-stages-plan
+    plan: benchmark_conda.yaml
+    ref: embed-gen

@@ -3,7 +3,8 @@
 
 Input
 -----
-File: ``--pcas.tsv`` produced by the pca entrypoint (cell-id-indexed PC scores).
+File: ``--embedding_tsv`` from any producer of the shared embedding_tsv output
+id (cell-id-indexed embedding coordinates).
 
 Output
 ------
@@ -21,14 +22,18 @@ Implementation notes
   (rsc does not expose HDBSCAN as a tl function). Requires ``--min_samples``
   and ``--min_cluster_size``. Noise points receive label -1 and are preserved
   as-is in the output; downstream metric stages must handle them.
-  ``--random_seed`` is accepted for CLI uniformity but ignored (HDBSCAN is
-  deterministic).
+  HDBSCAN has no seed parameter; passing ``--random_seed`` is rejected to
+  avoid the false impression that the run is seed-controlled.
+- ``rapids-dbscan`` uses ``cuml.cluster.DBSCAN`` directly on obsm["X_pca"].
+  Requires ``--eps`` (neighborhood radius) and ``--min_samples`` (min points
+  per core neighborhood). Noise points receive label -1, same convention as
+  HDBSCAN. DBSCAN has no seed parameter; passing ``--random_seed`` is
+  rejected.
 """
 
+import argparse
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import cuml.cluster
 import cupy as cp
@@ -36,38 +41,42 @@ import numpy as np
 import rapids_singlecell as rsc
 from obkit.logger import init_logger
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-from cli import build_cluster_embedding_parser  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent / "src"))  # vendored `common` (src/common) + module-local helpers
+from common import cli  # noqa: E402
 from gpu import setup_gpu  # noqa: E402
 from loaders import embedding_to_adata  # noqa: E402
+from options import ClusterEmbeddingOptions, build_cluster_embedding_opts  # noqa: E402
 from phases import phase  # noqa: E402
 from writers import Labels, read_embeddings, write_labels  # noqa: E402
 
 
-@dataclass
-class ClusterEmbeddingOptions:
-    method: str
-    random_seed: int
-    n_clusters: Optional[int] = None
-    min_samples: Optional[int] = None
-    min_cluster_size: Optional[int] = None
-
-
-def _build_opts(args) -> ClusterEmbeddingOptions:
-    if args.method == "rapids-kmeans" and args.n_clusters is None:
-        raise ValueError("--n_clusters is required for rapids-kmeans")
-    if args.method == "rapids-hdbscan":
-        if args.min_samples is None:
-            raise ValueError("--min_samples is required for rapids-hdbscan")
-        if args.min_cluster_size is None:
-            raise ValueError("--min_cluster_size is required for rapids-hdbscan")
-    return ClusterEmbeddingOptions(
-        method=args.method,
-        random_seed=args.random_seed,
-        n_clusters=args.n_clusters,
-        min_samples=args.min_samples,
-        min_cluster_size=args.min_cluster_size,
-    )
+def parse_args():
+    # No plan stage covers embedding-based clustering yet, but its input is the
+    # same embedding_tsv the NNG stage consumes, so borrow that arg contract.
+    p = argparse.ArgumentParser(description="OmniBenchmark cluster-embedding module (rapids-singlecell)")
+    cli.add_base_args(p)            # --output_dir, --name
+    cli.add_stage_args(p, "NNG")    # --embedding_tsv
+    p.add_argument("--method", type=str, required=True,
+                   choices=["rapids-kmeans", "rapids-hdbscan", "rapids-dbscan"],
+                   help="Clustering method token (see module docstring)")
+    p.add_argument("--n_clusters", type=int, default=None,
+                   help="Number of clusters; required for rapids-kmeans")
+    p.add_argument("--min_samples", type=int, default=None,
+                   help="Min samples per core point; required for rapids-hdbscan and rapids-dbscan")
+    p.add_argument("--min_cluster_size", type=int, default=None,
+                   help="Min cluster size; required for rapids-hdbscan")
+    # TODO: eps is an absolute distance in PCA space, so a value is only
+    # meaningful for the dataset and n_components it was chosen against --
+    # too small and every cell is noise, too large and everything is one
+    # cluster. It should be DERIVED per run (k-distance knee at min_samples,
+    # or a quantile of the kNN distances) rather than hard-coded in a plan.
+    p.add_argument("--eps", type=float, default=None,
+                   help="Neighborhood radius; required for rapids-dbscan. "
+                        "Dataset-dependent: see the TODO above")
+    p.add_argument("--random_seed", type=int, default=None,
+                   help="Random seed (required for rapids-kmeans; rejected for "
+                        "rapids-hdbscan and rapids-dbscan)")
+    return p.parse_args()
 
 
 def run_cluster(adata, opts: ClusterEmbeddingOptions):
@@ -77,6 +86,7 @@ def run_cluster(adata, opts: ClusterEmbeddingOptions):
             adata,
             n_clusters=opts.n_clusters,
             use_rep="X_pca",
+            n_pcs=adata.obsm["X_pca"].shape[1],
             random_state=opts.random_seed,
             key_added="cluster",
         )
@@ -87,26 +97,33 @@ def run_cluster(adata, opts: ClusterEmbeddingOptions):
         )
         labels = model.fit_predict(adata.obsm["X_pca"])
         adata.obs["cluster"] = cp.asnumpy(labels).astype(str)
+    elif opts.method == "rapids-dbscan":
+        model = cuml.cluster.DBSCAN(
+            eps=opts.eps,
+            min_samples=opts.min_samples,
+        )
+        labels = model.fit_predict(adata.obsm["X_pca"])
+        adata.obs["cluster"] = cp.asnumpy(labels).astype(str)
     else:
         raise ValueError(f"unknown method: {opts.method!r}")
 
 
 def main():
-    args = build_cluster_embedding_parser().parse_args()
+    args = parse_args()
     print(f"Full command: {' '.join(sys.argv)}")
-    for k in ("output_dir", "name", "pcas_tsv", "method",
-              "n_clusters", "min_samples", "min_cluster_size", "random_seed"):
+    for k in ("output_dir", "name", "embedding_tsv", "method",
+              "n_clusters", "min_samples", "min_cluster_size", "eps", "random_seed"):
         print(f"  {k}: {getattr(args, k)}")
 
-    opts = _build_opts(args)
+    opts = build_cluster_embedding_opts(args)
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    init_logger(args.output_dir)
+    init_logger(str(args.output_dir))
 
     setup_gpu()
 
     with phase("load") as attrs:
-        embedding = read_embeddings(args.pcas_tsv)
+        embedding = read_embeddings(args.embedding_tsv)
         adata = embedding_to_adata(embedding)
         attrs["n_cells"], attrs["n_dims"] = adata.obsm["X_pca"].shape
         print(f"  embedding: {adata.n_obs} cells x {adata.obsm['X_pca'].shape[1]} dims")

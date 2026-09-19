@@ -1,0 +1,8 @@
+{
+  "stage": "_base",
+  "version": "0.1.1",
+  "args": [
+    { "flag": "--output_dir", "type": "path", "help": "Output directory for results" },
+    { "flag": "--name", "type": "string", "help": "Module name/identifier" }
+  ]
+}

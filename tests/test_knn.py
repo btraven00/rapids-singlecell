@@ -6,7 +6,7 @@ from writers import read_embeddings, read_graph
 def _run(monkeypatch, tmp_path, pcas_tsv, n_neighbors=15, seed=42):
     monkeypatch.setattr(sys, "argv", [
         "knn.py",
-        "--pcas.tsv", str(pcas_tsv),
+        "--embedding_tsv", str(pcas_tsv),
         "--n_neighbors", str(n_neighbors),
         "--flavor", "rapids",
         "--random_seed", str(seed),
@@ -15,7 +15,7 @@ def _run(monkeypatch, tmp_path, pcas_tsv, n_neighbors=15, seed=42):
     ])
     from knn import main
     main()
-    return tmp_path / "test_knn.h5"
+    return tmp_path / "test_neighbors.h5"
 
 
 def test_knn_graph_shape(monkeypatch, tmp_path, pcas_tsv):

@@ -3,13 +3,12 @@
 
 Input
 -----
-File: ``--pcas.tsv`` produced by the pca entrypoint of this module
-(or any module that emits the same TSV format: header = PC names,
-each data row prefixed by cell barcode).
+File: ``--embedding_tsv`` from any producer of the shared embedding_tsv output id.
+Header = cell_id + dimension names (PC* or dim_*), each data row prefixed by cell barcode.
 
 Output
 ------
-File: {output_dir}/{name}_knn.h5
+File: {output_dir}/{name}_neighbors.h5  (NNG stage output: neighbors_h5)
 
   /distances/{data,indices,indptr,shape}        CSR sparse, n_cells x n_cells
   /connectivities/{data,indices,indptr,shape}   CSR sparse, n_cells x n_cells
@@ -20,10 +19,10 @@ identity, not on row order. Both sparse matrices share that ordering.
 
 Implementation notes
 --------------------
-- ``--flavor`` is a single opaque token ``rapids``. rsc.pp.neighbors'
-  internal ANN backend (CAGRA / IVF-Flat / IVF-PQ / brute_force) is left
-  at the cuVS default. Add new tokens (rapids-cagra, rapids-ivf-flat, ...)
-  in src/cli.py to expose the choice — see the docstring there.
+- ``--flavor`` selects the ANN backend / precision. ``rapids`` leaves
+  rsc.pp.neighbors at its cuVS default (currently CAGRA, FP32). Add new
+  tokens (rapids-ivf-flat, rapids-brute, ...) to the ``--flavor`` choices
+  to expose other backends.
 - The synthetic ``X = zeros((n_cells, 1))`` is just a stand-in to give
   AnnData a well-formed obs axis; the actual neighbors computation runs
   on ``obsm["X_pca"]`` (use_rep="X_pca").
@@ -32,18 +31,33 @@ Implementation notes
   brute-force once that token is added.
 """
 
+import argparse
 import sys
 from pathlib import Path
 
 import rapids_singlecell as rsc
 from obkit.logger import init_logger
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-from cli import build_knn_parser  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent / "src"))  # vendored `common` (src/common) + module-local helpers
+from common import cli  # noqa: E402
 from gpu import setup_gpu  # noqa: E402
 from loaders import embedding_to_adata  # noqa: E402
 from phases import phase  # noqa: E402
 from writers import NeighborGraph, read_embeddings, write_graph  # noqa: E402
+
+
+def parse_args():
+    # common/cli injects the synced contract; method params are hand-rolled.
+    p = argparse.ArgumentParser(description="OmniBenchmark kNN module (rapids-singlecell)")
+    cli.add_base_args(p)            # --output_dir, --name
+    cli.add_stage_args(p, "NNG")    # --embedding_tsv
+    p.add_argument("--n_neighbors", type=int, required=True,
+                   help="Number of nearest neighbors")
+    p.add_argument("--flavor", type=str, required=True,
+                   choices=["rapids"],
+                   help="kNN flavor token (see module docstring)")
+    p.add_argument("--random_seed", type=int, required=True, help="Random seed")
+    return p.parse_args()
 
 
 def run_knn(adata, args):
@@ -57,18 +71,18 @@ def run_knn(adata, args):
 
 
 def main():
-    args = build_knn_parser().parse_args()
+    args = parse_args()
     print(f"Full command: {' '.join(sys.argv)}")
-    for k in ("output_dir", "name", "pcas_tsv", "n_neighbors", "flavor", "random_seed"):
+    for k in ("output_dir", "name", "embedding_tsv", "n_neighbors", "flavor", "random_seed"):
         print(f"  {k}: {getattr(args, k)}")
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    init_logger(args.output_dir)
+    init_logger(str(args.output_dir))
 
     setup_gpu()
 
     with phase("load") as attrs:
-        emb = read_embeddings(args.pcas_tsv)
+        emb = read_embeddings(args.embedding_tsv)
         adata = embedding_to_adata(emb)
         attrs["n_cells"], attrs["n_components"] = emb.matrix.shape
         print(f"  embedding: {emb.matrix.shape}")
@@ -84,7 +98,7 @@ def main():
         rsc.get.anndata_to_CPU(adata, convert_all=True)
 
     with phase("write") as attrs:
-        out = Path(args.output_dir) / f"{args.name}_knn.h5"
+        out = Path(args.output_dir) / f"{args.name}_neighbors.h5"
         graph = NeighborGraph(
             distances=adata.obsp["distances"],
             connectivities=adata.obsp["connectivities"],
