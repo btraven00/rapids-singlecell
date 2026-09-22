@@ -2,14 +2,13 @@
 
 entrypoints:
   pca: pca.py
-  pca-prof: denet pca.py
+  pca-prof: prof.sh pca.py
   knn: knn.py
-  knn-prof: denet knn.py
+  knn-prof: prof.sh knn.py
   cluster: cluster_graph.py                 # CLUST stage: graph clustering on neighbors_h5
-  cluster-prof: denet cluster_graph.py
+  cluster-prof: prof.sh cluster_graph.py
   cluster_embedding: cluster_embedding.py   # rapids extra: clusters from pcas_tsv (no plan stage)
-  cluster_embedding-prof: denet cluster_embedding.py
-
+  cluster_embedding-prof: prof.sh cluster_embedding.py
 # common code (cli engine + stage schemas) vendored into src/common/.
 # `pixi run -e dev sync` (from this module root) refreshes it.
 templates:
