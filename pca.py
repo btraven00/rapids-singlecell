@@ -89,6 +89,12 @@ def parse_args():
     # unseeded solver -- benchmark_conda.yaml does, on covariance-eigh.
     p.add_argument("--random_seed", type=int, required=True,
                    help="Seed for reproducibility (only for lanczos/randomized-halko)")
+    # Randomized (halko) solver only; ignored by the others. Defaults match
+    # sklearn's randomized PCA as scanpy runs it, so the two arms are comparable.
+    p.add_argument("--n_iter", type=int, default=7,
+                   help="power iterations for randomized-halko (default 7, sklearn's 'auto' here)")
+    p.add_argument("--n_oversamples", type=int, default=10,
+                   help="oversamples for randomized-halko (default 10, sklearn's and rsc's)")
     return p.parse_args()
 
 
@@ -110,8 +116,10 @@ def run_pca(adata, args):
     # n_iter=2, 0.15 at 7, on values of order 1-3). 7 is what sklearn's
     # randomized_svd resolves n_iter="auto" to for this shape -- "a good
     # compromise for PCA" per its own source. 
-    # TODO: expose n_iter as a module parameter.
-    kwargs = {"n_iter": 7} if svd_solver == "randomized" else {}
+    # Both are module parameters now; defaults (7, 10) match sklearn's randomized
+    # solver as scanpy runs it (iterated_power="auto" -> 7 here, n_oversamples=10).
+    kwargs = ({"n_iter": args.n_iter, "n_oversamples": args.n_oversamples}
+              if svd_solver == "randomized" else {})
     rsc.pp.pca(
         adata,
         n_comps=args.n_components,

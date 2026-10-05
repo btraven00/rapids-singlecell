@@ -54,15 +54,40 @@ def parse_args():
     p.add_argument("--method", type=str, required=True,
                    choices=["rapids-leiden", "rapids-louvain"],
                    help="Clustering method token (see module docstring)")
-    p.add_argument("--resolution", type=float, required=True,
+    p.add_argument("--resolution", type=float, default=None,
                    help="Resolution parameter (higher -> more, smaller clusters)")
+    # One job, many resolutions: graph uploaded to the GPU once, Leiden at every
+    # point of a linear grid. Writes {name}_clusters_sweep.tsv (cell_id + one column
+    # per resolution) and {name}_sweep.json instead of {name}_clusters.tsv.
+    # cuGraph's max_iter: a CAP on Leiden levels/iterations; it stops earlier once
+    # converged, so a large value means "until convergence". Default 100 is rsc's.
+    # Not the same unit as igraph's n_iterations (scanpy) or leidenbase's n.iter
+    # (Seurat) -- see the module README.
+    p.add_argument("--n_iterations", type=int, default=100,
+                   help="max Leiden iterations (cuGraph max_iter; early stop at convergence)")
+    p.add_argument("--sweep", type=str, default=None,
+                   help="MIN:MAX:STEP resolution grid (inclusive); replaces --resolution")
     # not required here; per-method seed rules are enforced in src/options.py
     p.add_argument("--random_seed", type=int, default=None,
                    help="Random seed (required for rapids-leiden; rejected for rapids-louvain)")
-    return p.parse_args()
+    a = p.parse_args()
+    if (a.resolution is None) == (a.sweep is None):
+        p.error("give exactly one of --resolution or --sweep")
+    return a
 
 
-def run_cluster(adata, opts: ClusterOptions):
+def sweep_grid(spec):
+    """'MIN:MAX:STEP' -> resolutions MIN, MIN+STEP, ... up to MAX inclusive."""
+    lo, hi, step = (float(x) for x in spec.split(":"))
+    if not (0 < lo <= hi and step > 0):
+        raise ValueError(f"bad --sweep {spec!r}: need 0 < MIN <= MAX and STEP > 0")
+    n = int(np.floor((hi - lo) / step + 1e-9)) + 1
+    if n > 500:
+        raise ValueError(f"--sweep {spec!r} gives {n} resolutions; cap is 500")
+    return [round(lo + i * step, 10) for i in range(n)]
+
+
+def run_cluster(adata, opts: ClusterOptions, n_iterations=100):
     """GPU-only clustering. Pre/post: adata stays on GPU. Mutates in place.
 
     Stores cluster labels in ``adata.obs["cluster"]`` regardless of method,
@@ -74,6 +99,7 @@ def run_cluster(adata, opts: ClusterOptions):
             resolution=opts.resolution,
             obsp="connectivities",
             random_state=opts.random_seed,
+            n_iterations=n_iterations,
             key_added="cluster",
         )
     elif opts.method == "rapids-louvain":
@@ -90,7 +116,7 @@ def run_cluster(adata, opts: ClusterOptions):
 def main():
     args = parse_args()
     print(f"Full command: {' '.join(sys.argv)}")
-    for k in ("output_dir", "name", "neighbors_h5", "method", "resolution", "random_seed"):
+    for k in ("output_dir", "name", "neighbors_h5", "method", "resolution", "sweep", "random_seed", "n_iterations"):
         print(f"  {k}: {getattr(args, k)}")
 
     opts = build_cluster_opts(args)
@@ -112,8 +138,33 @@ def main():
     with phase("gpu_upload"):
         rsc.get.anndata_to_GPU(adata)
 
+    if args.sweep:
+        import json, time
+        import pandas as pd
+        cols, info = {}, []
+        with phase("compute") as attrs:
+            for r in sweep_grid(args.sweep):
+                opts.resolution = r
+                t0 = time.perf_counter()
+                run_cluster(adata, opts, args.n_iterations)
+                lab = adata.obs["cluster"].astype(str).to_numpy()
+                info.append(dict(resolution=r, n_clusters=int(len(np.unique(lab))),
+                                 seconds=round(time.perf_counter() - t0, 3)))
+                cols[f"{r:g}"] = lab
+                print(f"  resolution {r:g}: {info[-1]['n_clusters']} clusters ({info[-1]['seconds']} s)", flush=True)
+            attrs["method"], attrs["sweep"] = opts.method, args.sweep
+        with phase("write") as attrs:
+            out = Path(args.output_dir) / f"{args.name}_clusters_sweep.tsv"
+            pd.DataFrame(cols, index=pd.Index(list(graph.row_ids), name="cell_id")).to_csv(out, sep="\t")
+            (Path(args.output_dir) / f"{args.name}_sweep.json").write_text(json.dumps(
+                dict(sweep=args.sweep, method=opts.method, random_seed=opts.random_seed,
+                     n_iterations=args.n_iterations, resolutions=info), indent=1))
+            attrs["path"] = str(out)
+            print(f"  wrote: {out}")
+        return
+
     with phase("compute") as attrs:
-        run_cluster(adata, opts)
+        run_cluster(adata, opts, args.n_iterations)
         attrs["method"] = opts.method
         attrs["resolution"] = opts.resolution
 
