@@ -20,21 +20,24 @@ identity, not on row order. Both sparse matrices share that ordering.
 Implementation notes
 --------------------
 - ``--flavor`` selects the ANN backend / precision. ``rapids`` leaves
-  rsc.pp.neighbors at its cuVS default (currently CAGRA, FP32). Add new
-  tokens (rapids-ivf-flat, rapids-brute, ...) to the ``--flavor`` choices
-  to expose other backends.
+  rsc.pp.neighbors at its default, ``algorithm="brute"``: an EXACT search.
+  Add new tokens (rapids-ivf-flat, rapids-cagra, ...) to the ``--flavor``
+  choices to expose approximate backends.
 - The synthetic ``X = zeros((n_cells, 1))`` is just a stand-in to give
   AnnData a well-formed obs axis; the actual neighbors computation runs
   on ``obsm["X_pca"]`` (use_rep="X_pca").
 - ``random_seed`` is best-effort: only some ANN backends consult it
-  (IVF training, for instance). For a fully deterministic graph, prefer
-  brute-force once that token is added.
+  (IVF training, for instance). The default brute search ignores it.
+- ``--permutation_seed`` shuffles cell order before the search, the same
+  convention (and the same numpy RNG) as the scanpy knn module, so seed N
+  is the identical permutation in both arms.
 """
 
 import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import rapids_singlecell as rsc
 from obkit.logger import init_logger
 
@@ -43,7 +46,7 @@ from common import cli  # noqa: E402
 from gpu import setup_gpu  # noqa: E402
 from loaders import embedding_to_adata  # noqa: E402
 from phases import phase  # noqa: E402
-from writers import NeighborGraph, read_embeddings, write_graph  # noqa: E402
+from writers import Embedding, NeighborGraph, read_embeddings, write_graph  # noqa: E402
 
 
 def parse_args():
@@ -57,6 +60,10 @@ def parse_args():
                    choices=["rapids"],
                    help="kNN flavor token (see module docstring)")
     p.add_argument("--random_seed", type=int, required=True, help="Random seed")
+    # Leiden walks nodes in index order, so row order changes the clustering;
+    # random_seed cannot absorb that. Outputs stay keyed by barcode.
+    p.add_argument("--permutation_seed", type=int, default=0,
+                   help="shuffle cell order before building the graph; 0 = identity (control)")
     return p.parse_args()
 
 
@@ -73,7 +80,8 @@ def run_knn(adata, args):
 def main():
     args = parse_args()
     print(f"Full command: {' '.join(sys.argv)}")
-    for k in ("output_dir", "name", "embedding_tsv", "n_neighbors", "flavor", "random_seed"):
+    for k in ("output_dir", "name", "embedding_tsv", "n_neighbors", "flavor", "random_seed",
+              "permutation_seed"):
         print(f"  {k}: {getattr(args, k)}")
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
@@ -83,6 +91,10 @@ def main():
 
     with phase("load") as attrs:
         emb = read_embeddings(args.embedding_tsv)
+        if args.permutation_seed:
+            order = np.random.default_rng(args.permutation_seed).permutation(len(emb.row_ids))
+            emb = Embedding(emb.matrix[order], [emb.row_ids[i] for i in order], emb.col_names)
+            print(f"  permuted {len(order)} cells (seed {args.permutation_seed})")
         adata = embedding_to_adata(emb)
         attrs["n_cells"], attrs["n_components"] = emb.matrix.shape
         print(f"  embedding: {emb.matrix.shape}")
