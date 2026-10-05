@@ -19,15 +19,17 @@ identity, not on row order. Both sparse matrices share that ordering.
 
 Implementation notes
 --------------------
-- ``--flavor`` selects the ANN backend / precision. ``rapids`` leaves
-  rsc.pp.neighbors at its default, ``algorithm="brute"``: an EXACT search.
-  Add new tokens (rapids-ivf-flat, rapids-cagra, ...) to the ``--flavor``
-  choices to expose approximate backends.
+- ``--flavor`` selects the kNN backend. ``rapids`` leaves rsc.pp.neighbors
+  at its default, ``algorithm="brute"``: an EXACT, deterministic search.
+  ``rapids-cagra`` is cuVS CAGRA (approximate). Its index build is
+  NONDETERMINISTIC and unseedable: identical args gave Jaccard 0.983 between
+  reruns on 20k cells (recall 0.983). rsc passes random_state only to the
+  UMAP weights, never to the search, so ``--random_seed`` cannot fix it; a
+  new seed value just forces a fresh draw of that build noise.
 - The synthetic ``X = zeros((n_cells, 1))`` is just a stand-in to give
   AnnData a well-formed obs axis; the actual neighbors computation runs
   on ``obsm["X_pca"]`` (use_rep="X_pca").
-- ``random_seed`` is best-effort: only some ANN backends consult it
-  (IVF training, for instance). The default brute search ignores it.
+- ``random_seed`` reaches no kNN backend (see above).
 - ``--permutation_seed`` shuffles cell order before the search, the same
   convention (and the same numpy RNG) as the scanpy knn module, so seed N
   is the identical permutation in both arms.
@@ -57,7 +59,7 @@ def parse_args():
     p.add_argument("--n_neighbors", type=int, required=True,
                    help="Number of nearest neighbors")
     p.add_argument("--flavor", type=str, required=True,
-                   choices=["rapids"],
+                   choices=list(ALGORITHMS),
                    help="kNN flavor token (see module docstring)")
     p.add_argument("--random_seed", type=int, required=True, help="Random seed")
     # Leiden walks nodes in index order, so row order changes the clustering;
@@ -67,12 +69,16 @@ def parse_args():
     return p.parse_args()
 
 
+ALGORITHMS = {"rapids": "brute", "rapids-cagra": "cagra"}
+
+
 def run_knn(adata, args):
     """GPU-only neighbors. Pre/post: adata stays on GPU. Mutates in place."""
     rsc.pp.neighbors(
         adata,
         n_neighbors=args.n_neighbors,
         use_rep="X_pca",
+        algorithm=ALGORITHMS[args.flavor],
         random_state=args.random_seed,
     )
 
