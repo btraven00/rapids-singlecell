@@ -35,9 +35,12 @@ unchanged). Checked 2026-10-05 on tm-facs.
 | seurat | leidenbase `num_iter` (`FindClusters n.iter`) | 10 | runs *exactly* this many iterations, no early stop | **no**: values < 1 are rejected; use a large value (cost grows linearly: 2 = 4.3 s, 10 = 11.9 s, 50 = 68.5 s per resolution on tm-facs) |
 
 The units are not identical (igraph iterations vs cuGraph levels vs leidenbase
-iterations). For comparisons across tools set the same small value in all
-three (2 is the current choice): on tm-facs, Seurat modularity is 0.96261 at 2
-vs 0.96293 at 10 vs 0.96292 at 50, i.e. 2 is near-converged.
+iterations). For comparisons across tools use **7 in all three**. 2 is enough
+for scanpy and Seurat (Seurat modularity 0.96261 at 2 vs 0.96293 at 10 vs
+0.96292 at 50 on tm-facs) but NOT for rapids: cuGraph caps aggregation levels,
+and at 2 it returned ~3,200 clusters at every resolution. rapids' cluster
+counts at res 0.5 / 1.5 / 2.5 on a tm-facs SNN graph: 2 -> 3175/3183/3181,
+5 -> 107/114/129, 7 -> 48/70/84, 10 and 100 -> 48/68/83.
 
 **Randomized / iterative PCA (`pca` entrypoint)**
 
