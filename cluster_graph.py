@@ -59,8 +59,10 @@ def parse_args():
     # One job, many resolutions: graph uploaded to the GPU once, Leiden at every
     # point of a linear grid. Writes {name}_clusters_sweep.tsv (cell_id + one column
     # per resolution) and {name}_sweep.json instead of {name}_clusters.tsv.
-    # cuGraph's max_iter: a CAP on Leiden levels/iterations; it stops earlier once
+    # cuGraph's max_iter: a CAP on Leiden aggregation levels; it stops earlier once
     # converged, so a large value means "until convergence". Default 100 is rsc's.
+    # Do NOT set it low to "match" scanpy/Seurat's 2: levels are not iterations, and
+    # at 2 tm-facs returned ~3,200 clusters at every resolution.
     # Not the same unit as igraph's n_iterations (scanpy) or leidenbase's n.iter
     # (Seurat) -- see the module README.
     p.add_argument("--n_iterations", type=int, default=100,

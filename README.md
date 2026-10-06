@@ -31,7 +31,7 @@ unchanged). Checked 2026-10-05 on tm-facs.
 | module | backend | default | meaning | until convergence |
 |---|---|---|---|---|
 | scanpy | igraph (`flavor igraph`) / leidenalg | 2 | iterations of the Leiden algorithm | **yes**: any negative value runs until an iteration no longer improves quality |
-| rapids-singlecell | cuGraph `leiden(max_iter=)` | 100 | a *cap* on levels/iterations; stops early at convergence | effectively: a large cap (the default 100) |
+| rapids-singlecell | cuGraph `leiden(max_iter=)` | 100 | a *cap* on aggregation **levels**; stops early at convergence | effectively: a large cap (the default 100). **Never set it low**: at 2, tm-facs gave ~3,200 clusters at every resolution 0.05-2.65 (levels truncated before communities merge) |
 | seurat | leidenbase `num_iter` (`FindClusters n.iter`) | 10 | runs *exactly* this many iterations, no early stop | **no**: values < 1 are rejected; use a large value (cost grows linearly: 2 = 4.3 s, 10 = 11.9 s, 50 = 68.5 s per resolution on tm-facs) |
 
 The units are not identical (igraph iterations vs cuGraph levels vs leidenbase
