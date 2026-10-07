@@ -105,3 +105,16 @@ def test_residency_pcie(tmp_path):
     assert 3 < hi["h2d:data_h5ad"] / lo["h2d:data_h5ad"] < 5, (lo, hi)  # the one real upload tracks X
     for step in ("pca", "nng", "clust"):
         assert hi[step] < 1.5 * lo[step] + 1e6, (step, lo[step], hi[step])  # flat in X (+1 MB noise)
+
+
+def test_external_input_moves_to_device(h5ad):
+    """After h2d the runner drops the host matrix of an external input (move), so it is freed."""
+    import gc
+    import weakref
+    from artifacts import DevMatrix, MatrixIO
+    env = {"data_h5ad": MatrixIO.load(h5ad)}
+    host_x = weakref.ref(env["data_h5ad"].X)
+    dev = fuse._as(env, "data_h5ad", DevMatrix, move=True)
+    gc.collect()
+    assert isinstance(dev, DevMatrix) and env["data_h5ad"] is dev
+    assert host_x() is None, "host X still referenced after the move"

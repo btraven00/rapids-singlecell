@@ -18,6 +18,7 @@ entries and a no-op sync, and gets the same runner. This is what would move into
 
 import argparse
 import dataclasses
+import gc
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -108,8 +109,12 @@ def parse_args(argv=None):
     return p.parse_args(argv), stages, external
 
 
-def _as(env, k, want, prefix=""):
-    """Value k as type `want`, crossing the boundary (timed) if needed; cached."""
+def _as(env, k, want, prefix="", move=False):
+    """Value k as type `want`, crossing the boundary (timed) if needed; cached.
+
+    move=True replaces env[k] with the transferred value, so the source copy can be
+    freed. The runner moves the chain's external inputs: they are never saved and never
+    needed on the host again, so after h2d the host X would only hold RAM."""
     have = env[k]
     if type(have) is want:
         return have
@@ -118,13 +123,18 @@ def _as(env, k, want, prefix=""):
         f = TRANSFER[(type(have), want)]
         with timed(f"{prefix}{f.__name__}:{k}"):
             env[key] = f(have)
+            if move:
+                del have
+                env[k] = env.pop(key)
+                gc.collect()  # drop the host matrix now, not at some later collection
+                return env[k]
     return env[key]
 
 
 def _chain(env, stages, a, prefix=""):
-    produced = []
+    produced, external = [], set(env)
     for st in (STEPS[s] for s in stages):
-        ins = {k: _as(env, k, t, prefix) for k, t in st.inputs.items()}
+        ins = {k: _as(env, k, t, prefix, move=k in external) for k, t in st.inputs.items()}
         with timed(prefix + st.stage.lower()):
             res = st.run(ins, {k: a[f"{st.stage.lower()}_{k}"] for k in st.params})
         env.update(res)

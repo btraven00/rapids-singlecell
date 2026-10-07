@@ -68,7 +68,9 @@ class DevGraph:
 
 def h2d(x):
     if isinstance(x, ad.AnnData):
-        a = ad.AnnData(X=x.X, obs=x.obs[[]], var=x.var[[]])  # new object: the caller's AnnData stays on host
+        # New object sharing x.X: the caller's AnnData is left as it was. Whether the host
+        # matrix then survives is the runner's call (fuse._as(move=True) drops it).
+        a = ad.AnnData(X=x.X, obs=x.obs[[]], var=x.var[[]])
         rsc.get.anndata_to_GPU(a)
         return DevMatrix(a)
     if isinstance(x, Embedding):
