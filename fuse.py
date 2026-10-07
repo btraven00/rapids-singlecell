@@ -4,7 +4,8 @@
   --steps PCA,NNG,CLUST   fused: intermediates stay where the steps put them
   --steps NNG             split: one stage, load -> (h2d) -> run -> (d2h) -> save
 
-Phases, each closed only after the GPU is idle (artifacts.sync):
+Phases, each closed only after the GPU is idle (artifacts.sync), each carrying its
+PCIe bytes (pcie_rx_bytes host->GPU, pcie_tx_bytes GPU->host) in the end event:
   init                  device setup (CUDA context, RMM); zero-cost for a CPU module
   load                  read the chain's external inputs (host)
   h2d:<id> / d2h:<id>   one per boundary crossing, inserted from the type mismatch
@@ -23,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 from phases import phase  # noqa: E402
+from pcie import counters  # noqa: E402
 from obkit.logger import init_logger  # noqa: E402
 from steps import IO, STEPS, TRANSFER, sync  # noqa: E402
 
@@ -68,9 +70,16 @@ def plan(stages):
 
 @contextmanager
 def timed(name):
+    """A phase that ends only when the GPU is idle, with its PCIe traffic in the end event:
+    pcie_rx_bytes (host -> GPU) and pcie_tx_bytes (GPU -> host), device-wide (src/pcie.py)."""
+    sync()
+    c0 = counters()
     with phase(name) as attrs:
         yield attrs
         sync()
+        c1 = counters()
+        if c0 and c1:
+            attrs["pcie_tx_bytes"], attrs["pcie_rx_bytes"] = c1[0] - c0[0], c1[1] - c0[1]
 
 
 def parse_args(argv=None):

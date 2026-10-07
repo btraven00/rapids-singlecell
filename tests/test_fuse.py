@@ -79,3 +79,29 @@ def test_warmup_phases(tmp_path, h5ad):
               + _args(["PCA", "NNG", "CLUST"], data_h5ad=h5ad))
     assert _phases(tmp_path) == ["init", "load", "warmup:h2d:data_h5ad", "warmup:pca", "warmup:nng",
                                  "warmup:clust", "h2d:data_h5ad", "pca", "nng", "clust", "write"]
+
+
+def test_residency_pcie(tmp_path):
+    """No step moves X over PCIe after h2d:data_h5ad. Model-free check: same cells, X 4x
+    denser. The upload must scale with X, while each step's traffic must not, because it
+    depends on n_cells, k and n_components only. (The public rsc API does round-trip the
+    embedding and graph inside the steps; for Leiden that can exceed X itself.)
+    Needs NVML PCIe counters, which are device-wide, so a busy GPU adds noise."""
+    from pcie import counters
+    if counters() is None:
+        pytest.skip("NVML PCIe byte counters unavailable")
+    n, g = 20_000, 2_000
+    rx = {}
+    for density in (0.02, 0.08):
+        X = sp.random(n, g, density=density, format="csr", random_state=np.random.default_rng(0), dtype=np.float32)
+        a = ad.AnnData(X=X)
+        a.obs_names = [f"c{i}" for i in range(n)]
+        d = tmp_path / str(density)
+        a.write_h5ad(tmp_path / f"{density}.h5ad")
+        fuse.main(["--output_dir", str(d), "--name", "x"] + _args(["PCA", "NNG", "CLUST"], data_h5ad=tmp_path / f"{density}.h5ad"))
+        rx[density] = {e["event"]: e["attrs"]["pcie_rx_bytes"] for e in map(json.loads, open(d / "obkit-events.jsonl"))
+                       if e["phase"] == "end" and "attrs" in e and "pcie_rx_bytes" in e["attrs"]}
+    lo, hi = rx[0.02], rx[0.08]
+    assert 3 < hi["h2d:data_h5ad"] / lo["h2d:data_h5ad"] < 5, (lo, hi)  # the one real upload tracks X
+    for step in ("pca", "nng", "clust"):
+        assert hi[step] < 1.5 * lo[step] + 1e6, (step, lo[step], hi[step])  # flat in X (+1 MB noise)
