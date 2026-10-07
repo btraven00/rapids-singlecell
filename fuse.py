@@ -16,6 +16,7 @@ entries and a no-op sync, and gets the same runner. This is what would move into
 """
 
 import argparse
+import dataclasses
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,6 +25,21 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from phases import phase  # noqa: E402
 from obkit.logger import init_logger  # noqa: E402
 from steps import IO, STEPS, TRANSFER, sync  # noqa: E402
+
+import anndata as ad  # noqa: E402
+
+
+def _head(v, n):
+    """The first n cells of a loaded input, for the warm-up run."""
+    if isinstance(v, ad.AnnData):
+        return v[:n].copy()
+    def cut(x):
+        if isinstance(x, list):
+            return x[:n]
+        if hasattr(x, "shape") and len(x.shape) == 2 and x.shape[0] == x.shape[1]:
+            return x[:n, :n]  # cell x cell graph
+        return x[:n] if hasattr(x, "shape") else x
+    return dataclasses.replace(v, **{f.name: cut(getattr(v, f.name)) for f in dataclasses.fields(v)})
 
 
 def _host_of(t):
@@ -70,6 +86,10 @@ def parse_args(argv=None):
     p.add_argument("--steps", required=True)
     p.add_argument("--replicate", type=int, default=0)  # unused; separates same-seed replicate dirs
     p.add_argument("--threads", type=int, default=0)    # run-wide; used by fuse-prof.sh
+    # Run-wide: run the chain once on the first N cells under warmup:* phases and discard
+    # it, so JIT/kernel compilation and device init land there, not in the timed phases.
+    # N must be large enough to take the same code paths (scanpy kNN: >= 4096 cells).
+    p.add_argument("--warmup_cells", type=int, default=0)
     for k in external:
         p.add_argument(f"--{k}", type=Path, required=True)
     # step parameters are namespaced by stage: --pca_dtype, --nng_n_neighbors, --clust_random_seed
@@ -79,7 +99,7 @@ def parse_args(argv=None):
     return p.parse_args(argv), stages, external
 
 
-def _as(env, k, want):
+def _as(env, k, want, prefix=""):
     """Value k as type `want`, crossing the boundary (timed) if needed; cached."""
     have = env[k]
     if type(have) is want:
@@ -87,9 +107,20 @@ def _as(env, k, want):
     key = (k, want)
     if key not in env:
         f = TRANSFER[(type(have), want)]
-        with timed(f"{f.__name__}:{k}"):
+        with timed(f"{prefix}{f.__name__}:{k}"):
             env[key] = f(have)
     return env[key]
+
+
+def _chain(env, stages, a, prefix=""):
+    produced = []
+    for st in (STEPS[s] for s in stages):
+        ins = {k: _as(env, k, t, prefix) for k, t in st.inputs.items()}
+        with timed(prefix + st.stage.lower()):
+            res = st.run(ins, {k: a[f"{st.stage.lower()}_{k}"] for k in st.params})
+        env.update(res)
+        produced += list(res)
+    return {k: _as(env, k, _host_of(type(env[k])), prefix) for k in produced}
 
 
 def main(argv=None):
@@ -104,14 +135,9 @@ def main(argv=None):
 
     with timed("load"):
         env = {k: IO[_host_of(t)].load(a[k]) for k, t in external.items()}
-    produced = []
-    for st in (STEPS[s] for s in stages):
-        ins = {k: _as(env, k, t) for k, t in st.inputs.items()}
-        with timed(st.stage.lower()):
-            res = st.run(ins, {k: a[f"{st.stage.lower()}_{k}"] for k in st.params})
-        env.update(res)
-        produced += list(res)
-    host = {k: _as(env, k, _host_of(type(env[k]))) for k in produced}
+    if args.warmup_cells:
+        _chain({k: _head(v, args.warmup_cells) for k, v in env.items()}, stages, a, "warmup:")
+    host = _chain(env, stages, a)
     with timed("write"):
         for k, v in host.items():
             IO[type(v)].save(v, out / f"{args.name}{IO[type(v)].suffix}")

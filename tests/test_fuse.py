@@ -72,3 +72,10 @@ def test_repeat_within_eps(tmp_path, h5ad):
 def test_chain_typecheck():
     assert set(fuse.plan(["PCA", "NNG", "CLUST"])) == {"data_h5ad"}
     assert set(fuse.plan(["NNG"])) == {"embedding_tsv"}
+
+
+def test_warmup_phases(tmp_path, h5ad):
+    fuse.main(["--output_dir", str(tmp_path), "--name", "x", "--warmup_cells", "100"]
+              + _args(["PCA", "NNG", "CLUST"], data_h5ad=h5ad))
+    assert _phases(tmp_path) == ["init", "load", "warmup:h2d:data_h5ad", "warmup:pca", "warmup:nng",
+                                 "warmup:clust", "h2d:data_h5ad", "pca", "nng", "clust", "write"]
