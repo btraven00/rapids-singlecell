@@ -19,6 +19,8 @@ entries and a no-op sync, and gets the same runner. This is what would move into
 import argparse
 import dataclasses
 import gc
+import os
+import signal
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -26,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 from phases import phase  # noqa: E402
 from pcie import counters  # noqa: E402
-from obkit.logger import init_logger  # noqa: E402
+from obkit.logger import emit, init_logger  # noqa: E402
 from steps import IO, STEPS, TRANSFER, sync  # noqa: E402
 
 import anndata as ad  # noqa: E402
@@ -95,6 +97,10 @@ def parse_args(argv=None):
     p.add_argument("--name", required=True)
     p.add_argument("--steps", required=True)
     p.add_argument("--replicate", type=int, default=0)  # unused; separates same-seed replicate dirs
+    # In-process replicates after one warm-up: replicate r writes to rep<r>/ (and r=0 also to
+    # the declared outputs), with every *_random_seed + r * seed_stride (0: same-seed replicates).
+    p.add_argument("--replicates", type=int, default=1)
+    p.add_argument("--seed_stride", type=int, default=0)
     p.add_argument("--threads", type=int, default=0)    # run-wide; used by fuse-prof.sh
     # Run-wide: run the chain once on the first N cells under warmup:* phases and discard
     # it, so JIT/kernel compilation and device init land there, not in the timed phases.
@@ -142,24 +148,65 @@ def _chain(env, stages, a, prefix=""):
     return {k: _as(env, k, _host_of(type(env[k])), prefix) for k in produced}
 
 
+def _mem():
+    """Current host RSS and device memory in use (device-wide: needs the exclusive GPU), for the
+    creep check across replicates."""
+    import cupy as cp
+    m = {}
+    try:
+        m["rss_mb"] = round(int(open("/proc/self/statm").read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 2**20, 1)
+    except OSError:
+        pass
+    free, total = cp.cuda.runtime.memGetInfo()
+    m["gpu_used_mb"], m["gpu_total_mb"] = round((total - free) / 2**20, 1), round(total / 2**20, 1)
+    return m
+
+
 def main(argv=None):
     from gpu import setup_gpu  # this module's RMM settings; a CPU module has none
     args, stages, external = parse_args(argv)
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     init_logger(str(out))
-    with timed("init"):  # CUDA context + RMM allocator: a fixed cost every run pays
-        setup_gpu()
     a = vars(args)
+    state = {"replicate": None, "done": 0}
 
-    with timed("load"):
-        env = {k: IO[_host_of(t)].load(a[k]) for k, t in external.items()}
-    if args.warmup_cells:
-        _chain({k: _head(v, args.warmup_cells) for k, v in env.items()}, stages, a, "warmup:")
-    host = _chain(env, stages, a)
-    with timed("write"):
-        for k, v in host.items():
-            IO[type(v)].save(v, out / f"{args.name}{IO[type(v)].suffix}")
+    # Why we quit, in the event log: ok / sigterm (the runner's time limit) / error. Python runs
+    # the handler between bytecodes, so a long kernel or C call delays it; the runner's own
+    # record of SIGTERM / kill / OOM is authoritative, this says where the module was.
+    def on_term(*_):
+        emit("exit", "end", attrs=dict(state, reason="sigterm"))
+        sys.exit(128 + signal.SIGTERM)
+    signal.signal(signal.SIGTERM, on_term)
+    try:
+        with timed("init"):  # CUDA context + RMM allocator: a fixed cost every run pays
+            setup_gpu()
+        with timed("load"):
+            env = {k: IO[_host_of(t)].load(a[k]) for k, t in external.items()}
+        if args.warmup_cells:
+            _chain({k: _head(v, args.warmup_cells) for k, v in env.items()}, stages, a, "warmup:")
+        for r in range(args.replicates):
+            state["replicate"] = r
+            ar = {k: v + r * args.seed_stride if k.endswith("_random_seed") else v for k, v in a.items()}
+            if r:  # fresh host inputs (the last replicate moved X to the device) and a collected heap
+                env = host = None
+                gc.collect()
+                with timed("load"):
+                    env = {k: IO[_host_of(t)].load(a[k]) for k, t in external.items()}
+            with phase("replicate") as attrs:
+                attrs.update(replicate=r, seeds={k: v for k, v in ar.items() if k.endswith("_random_seed")})
+                host = _chain(env, stages, ar)
+                attrs.update(_mem())
+            with timed("write"):  # after each replicate, so a SIGTERM keeps the finished ones
+                for d in [out / f"rep{r}"] + ([out] if r == 0 else []):
+                    d.mkdir(exist_ok=True)
+                    for k, v in host.items():
+                        IO[type(v)].save(v, d / f"{args.name}{IO[type(v)].suffix}")
+            state["done"] = r + 1
+    except Exception as e:
+        emit("exit", "end", attrs=dict(state, reason="error", error=f"{type(e).__name__}: {e}"))
+        raise
+    emit("exit", "end", attrs=dict(state, reason="ok"))
 
 
 if __name__ == "__main__":

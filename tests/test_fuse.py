@@ -48,7 +48,7 @@ def h5ad(tmp_path):
 def test_fused_crosses_once_and_matches_split(tmp_path, h5ad):
     f, s = tmp_path / "fused", tmp_path / "split"
     fuse.main(["--output_dir", str(f), "--name", "x"] + _args(["PCA", "NNG", "CLUST"], data_h5ad=h5ad))
-    assert _phases(f) == ["init", "load", "h2d:data_h5ad", "pca", "nng", "clust", "write"]
+    assert _phases(f) == ["init", "load", "h2d:data_h5ad", "pca", "nng", "clust", "replicate", "write", "exit"]
 
     fuse.main(["--output_dir", str(s / "1"), "--name", "x"] + _args(["PCA"], data_h5ad=h5ad))
     fuse.main(["--output_dir", str(s / "2"), "--name", "x"] + _args(["NNG"], embedding_tsv=s / "1" / "x_embedding.tsv"))
@@ -78,7 +78,7 @@ def test_warmup_phases(tmp_path, h5ad):
     fuse.main(["--output_dir", str(tmp_path), "--name", "x", "--warmup_cells", "100"]
               + _args(["PCA", "NNG", "CLUST"], data_h5ad=h5ad))
     assert _phases(tmp_path) == ["init", "load", "warmup:h2d:data_h5ad", "warmup:pca", "warmup:nng",
-                                 "warmup:clust", "h2d:data_h5ad", "pca", "nng", "clust", "write"]
+                                 "warmup:clust", "h2d:data_h5ad", "pca", "nng", "clust", "replicate", "write", "exit"]
 
 
 def test_residency_pcie(tmp_path):
@@ -118,3 +118,23 @@ def test_external_input_moves_to_device(h5ad):
     gc.collect()
     assert isinstance(dev, DevMatrix) and env["data_h5ad"] is dev
     assert host_x() is None, "host X still referenced after the move"
+
+
+def test_replicates_match_fresh_processes(tmp_path, h5ad):
+    """In-process replicate r ~ a fresh run with its seeds (to eps / ARI, as above): nothing
+    carried between replicates. Each replicate re-uploads X and reports host and device memory."""
+    loop, fresh = tmp_path / "loop", tmp_path / "fresh"
+    fuse.main(["--output_dir", str(loop), "--name", "x", "--replicates", "3", "--seed_stride", "1"]
+              + _args(["PCA", "NNG", "CLUST"], data_h5ad=h5ad))
+    a = _args(["PCA", "NNG", "CLUST"], data_h5ad=h5ad)
+    fuse.main(["--output_dir", str(fresh), "--name", "x"] + [v if not a[i - 1].endswith("_random_seed") else "2" for i, v in enumerate(a)])
+    assert_close_pcs(EmbeddingIO.load(loop / "rep2" / "x_embedding.tsv").matrix,
+                     EmbeddingIO.load(fresh / "x_embedding.tsv").matrix, P["dtype"])
+    assert adjusted_rand_score(LabelsIO.load(loop / "rep2" / "x_clusters.tsv").values,
+                               LabelsIO.load(fresh / "x_clusters.tsv").values) > 0.95
+    ev = [json.loads(l) for l in open(loop / "obkit-events.jsonl")]
+    assert [e["event"] for e in ev if e["phase"] == "end"].count("h2d:data_h5ad") == 3
+    reps = [e["attrs"] for e in ev if e["event"] == "replicate" and e["phase"] == "end"]
+    assert [r["seeds"]["clust_random_seed"] for r in reps] == [0, 1, 2]
+    assert all(r["gpu_used_mb"] > 0 and r["rss_mb"] > 0 for r in reps)
+    assert ev[-1]["event"] == "exit" and ev[-1]["attrs"]["reason"] == "ok" and ev[-1]["attrs"]["done"] == 3
