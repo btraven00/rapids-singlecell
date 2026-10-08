@@ -7,6 +7,7 @@ dependencies:
 - python >=3.13,<3.14
 - pip *
 - polars >=1,<2
+- denet >=0.10.3
 - pip
 - pip:
   - rapids-singlecell-cu13[rapids]==0.16.1
