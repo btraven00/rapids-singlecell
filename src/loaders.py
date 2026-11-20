@@ -51,7 +51,7 @@ def load_matrix(h5_path, dense=False):
 def embedding_to_adata(embedding):
     """Wrap an Embedding in a host AnnData with the matrix in obsm["X_pca"].
 
-    ascontiguousarray is load-bearing: read_embeddings' matrix comes from pandas
+    ascontiguousarray is load-bearing: read_embeddings' matrix comes from a dataframe's
     .to_numpy() and is F-contiguous, but the RAPIDS consumers read the raw buffer
     as C-ordered (cuML 26.06 HDBSCAN silently labels every cell noise). This is
     the one place every GPU consumer of an embedding routes through.

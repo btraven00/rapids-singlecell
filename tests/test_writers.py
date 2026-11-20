@@ -58,3 +58,26 @@ def test_writes_spec_layout(tmp_path, neighbors_h5):
     assert got.row_ids == ours.row_ids
     assert (got.distances != ours.distances).nnz == 0
     assert (got.connectivities != ours.connectivities).nnz == 0
+
+
+def test_embedding_round_trip_is_exact(tmp_path):
+    """read_embeddings(write_embeddings(x)) == x bit for bit, ids and names kept as strings."""
+    from writers import Embedding, read_embeddings, write_embeddings
+
+    rng = np.random.default_rng(0)
+    m = rng.standard_normal((500, 7)) * 10.0 ** rng.integers(-12, 12, (500, 7))
+    m[:, 0] = np.arange(500)                      # integer-looking column stays float64
+    emb = Embedding(m, [str(i) for i in range(500)], [f"PC{i + 1}" for i in range(7)])  # numeric-looking ids
+    write_embeddings(emb, tmp_path / "e.tsv")
+    back = read_embeddings(tmp_path / "e.tsv")
+    assert back.matrix.dtype == np.float64 and back.matrix.flags.c_contiguous
+    assert back.matrix.tobytes() == m.tobytes()
+    assert back.row_ids == emb.row_ids and back.col_names == emb.col_names
+
+
+def test_reads_embedding_without_id_header(pcas_tsv):
+    """R's write.table layout (N header names over N+1 fields), as in the fixture."""
+    from writers import read_embeddings
+
+    emb = read_embeddings(pcas_tsv)
+    assert emb.col_names[0] == "PC1" and emb.matrix.shape == (len(emb.row_ids), len(emb.col_names))

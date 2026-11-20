@@ -60,20 +60,28 @@ def read_embeddings(path, format=TSV):
     """Inverse of write_embeddings. Round-trip-stable for the TSV format."""
     if format != TSV:
         raise ValueError(f"unsupported format: {format!r}")
-    # float_precision="round_trip": the default parser is off by 1-2 ULP on
-    # ~0.6% of values, and knn.py reads its embedding through here while the
-    # scanpy module reads the same file with polars (which is exact). Two arms
-    # disagreeing on the last bit of the input is precisely the size of effect
-    # this benchmark measures.
-    df = pd.read_csv(path, sep="\t", index_col=0, float_precision="round_trip")
+    # polars: exact float parsing (pandas' default parser is off by 1-2 ULP on
+    # ~0.6% of values; the scanpy module reads the same file with polars), and
+    # ~10x faster than pandas' float_precision="round_trip" (15 s at 1M cells).
+    # Explicit schema: numeric-looking cell ids stay strings, integer-looking
+    # columns stay float64. The header may or may not name the id column
+    # (R's write.table leaves it out: N names over N+1 fields).
+    with open(path) as f:
+        cols = f.readline().rstrip("\n").split("\t")
+        if len(cols) > f.readline().count("\t"):
+            cols = cols[1:]
+    df = pl.read_csv(path, separator="\t", has_header=False, skip_rows=1,
+                     new_columns=["cell_id", *cols],
+                     schema_overrides=[pl.String] + [pl.Float64] * len(cols))
     return Embedding(
-        # to_numpy() on a single-dtype frame hands back the internal block
-        # transposed, i.e. F-contiguous. cuml.cluster.HDBSCAN does not copy and
-        # does not complain -- it just labels every point noise. Force C order
-        # here so no GPU consumer downstream has to know that.
-        matrix=np.ascontiguousarray(df.to_numpy(dtype=np.float64)),
-        row_ids=list(df.index),
-        col_names=list(df.columns),
+        # A dataframe's to_numpy() can return a column-major (F-order) array.
+        # cuML's HDBSCAN reads the buffer as row-major without checking, so an
+        # F-order matrix gives garbage with no error: most or all cells come
+        # back labelled noise (cuML 26.06; 100% on tests/data/datasets_pcas.tsv).
+        # Force row-major (C order) here, for every consumer.
+        matrix=np.ascontiguousarray(df[:, 1:].to_numpy(), dtype=np.float64),
+        row_ids=df[:, 0].to_list(),
+        col_names=cols,
     )
 
 
