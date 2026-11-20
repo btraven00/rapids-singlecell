@@ -9,6 +9,6 @@ dependencies:
 - polars >=1,<2
 - pip
 - pip:
-  - rapids-singlecell-cu13[rapids]==0.16.1
+  - rapids-singlecell-cu13[rapids]==0.18.1
   - obkit>=0.0.3, <0.0.4
   - pytest>=8
